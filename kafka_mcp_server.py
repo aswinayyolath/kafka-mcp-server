@@ -63,7 +63,7 @@ KAFKA_CONFIG = {
     'sasl_password': os.getenv('KAFKA_SASL_PASSWORD'),
     'ssl_cafile': os.getenv('KAFKA_SSL_CAFILE'),
     'ssl_certfile': os.getenv('KAFKA_SSL_CERTFILE'),
-    'ssl_keyfile': os.getenv('KAFKA_SSL_KEYFILE'),  # Fixed typo: was KAFKA_KEYFILE
+    'ssl_keyfile': os.getenv('KAFKA_SSL_KEYFILE'),
 }
 
 # Remove None values from config
@@ -137,7 +137,7 @@ _kafka_context: Optional[KafkaContext] = None
 @asynccontextmanager
 async def kafka_lifespan(server: FastMCP) -> AsyncIterator[KafkaContext]:
     """Manage Kafka connections lifecycle."""
-    global _kafka_context # Declare intent to modify the global variable
+    global _kafka_context
     logger.info("Initializing Kafka connections...")
     
     admin_client = None
@@ -207,17 +207,17 @@ async def get_cluster_info(ctx: Context) -> ClusterInfo:
         brokers_data = []
         controller_data = None
 
-        # Robust handling for metadata, which can be dict or object
+        # Handle different metadata formats
         if isinstance(metadata, dict):
             cluster_id = metadata.get('cluster_id', 'unknown')
             brokers_data = metadata.get('brokers', [])
             controller_data = metadata.get('controller', None)
-        elif hasattr(metadata, 'cluster_id'): # Fallback for object-like metadata
+        elif hasattr(metadata, 'cluster_id'):
             cluster_id = metadata.cluster_id or "unknown"
-            brokers_data = getattr(metadata, 'brokers', []) # Use getattr for safety
-            controller_data = getattr(metadata, 'controller', None) # Use getattr for safety
+            brokers_data = getattr(metadata, 'brokers', [])
+            controller_data = getattr(metadata, 'controller', None)
         
-        # Get all topics for counting (admin.list_topics() returns a dict of topic metadata)
+        # Get all topics for counting
         topics_metadata = admin.list_topics()
         
         topics_count = 0
@@ -288,7 +288,7 @@ async def list_topics(ctx: Context, include_internal: bool = False) -> str:
             # Direct dict of topic metadata
             topics_dict = topics_metadata
         else:
-            # Fallback - try to iterate directly
+            # Try iterating directly
             try:
                 for topic in topics_metadata:
                     topic_name = None
@@ -373,7 +373,7 @@ async def describe_topic(ctx: Context, topic_name: str) -> str:
             if topic_name in topics_metadata:
                 topic_metadata = topics_metadata[topic_name]
         else:
-            # Fallback - try to iterate directly
+            # Try iterating directly
             for topic in topics_metadata:
                 if hasattr(topic, 'topic') and topic.topic == topic_name:
                     topic_metadata = topic
@@ -1067,7 +1067,7 @@ async def cluster_info_resource() -> str: # Removed ctx: Context
             cluster_id = metadata.cluster_id or "unknown"
             brokers_data = getattr(metadata, 'brokers', [])
             controller_data = getattr(metadata, 'controller', None)
-        else: # Fallback for unexpected metadata type
+        else:
             logger.warning(f"Unexpected type for cluster metadata: {type(metadata)}")
             return "Error: Could not retrieve cluster info due to unexpected metadata format."
 
@@ -1082,7 +1082,7 @@ async def cluster_info_resource() -> str: # Removed ctx: Context
                     partitions_count += len(topic_meta.partitions)
                 elif isinstance(topic_meta, dict) and 'partitions' in topic_meta and topic_meta['partitions']:
                     partitions_count += len(topic_meta['partitions'])
-        else: # Assume it's an iterable of TopicMetadata objects directly
+        else:
             topics_count = len(topics_metadata)
             for topic_meta in topics_metadata:
                 if hasattr(topic_meta, 'partitions') and topic_meta.partitions:
@@ -1151,8 +1151,7 @@ async def topics_list_resource() -> str: # Removed ctx: Context
             num_partitions = 0
             replication_factor = 0
             
-            # Kafka-python returns TopicMetadata objects, which have a partitions attribute
-            # This attribute is a dict {partition_id: PartitionMetadata}
+
             partitions_dict = getattr(topic_metadata, 'partitions', None)
             if partitions_dict:
                 num_partitions = len(partitions_dict)
@@ -1188,7 +1187,7 @@ Total Topics: {len(topics)}
     except Exception as e:
         return f"Error getting topics: {str(e)}"
 
-# PROMPTS - signatures are fine as they have explicit parameters, not 'ctx' for URI matching
+
 
 @mcp.prompt()
 def kafka_monitoring_prompt(topic_name: str = "") -> str:

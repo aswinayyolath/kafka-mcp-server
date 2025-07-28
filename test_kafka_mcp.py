@@ -851,7 +851,7 @@ class KafkaMCPTester:
                 
                 if not success:
                     overall_success = False
-                    # We continue running other tests even if one fails
+
                     
             except Exception as e:
                 self.log_test(
@@ -861,11 +861,10 @@ class KafkaMCPTester:
                 )
                 overall_success = False
         
-        # Always attempt cleanup, but its success doesn't dictate overall_success
-        # unless it fails critically (like connection error)
+        # Always attempt cleanup
         cleanup_succeeded = await self.cleanup_test_resources()
         if not cleanup_succeeded:
-            overall_success = False # Cleanup failing is also a problem
+            overall_success = False
             
         return overall_success
 
