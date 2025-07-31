@@ -22,7 +22,7 @@ A comprehensive Model Context Protocol (MCP) server for Apache Kafka operations,
 
 1. **Clone the repository**:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/aswinayyolath/kafka-mcp-server.git
    cd kafka-mcp-server
    ```
 
