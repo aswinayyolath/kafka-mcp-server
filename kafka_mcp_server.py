@@ -359,110 +359,66 @@ async def describe_topic(ctx: Context, topic_name: str) -> str:
     admin = kafka_ctx.admin_client
     
     try:
-        # Get topics metadata using list_topics
-        topics_metadata = admin.list_topics()
-        topic_metadata = None
+        # Use the simple describe_topics approach from reference implementation
+        metadata = admin.describe_topics([topic_name])
         
-        # Handle different return types from list_topics()
-        if hasattr(topics_metadata, 'topics'):
-            # ClusterMetadata object with topics attribute
-            if topic_name in topics_metadata.topics:
-                topic_metadata = topics_metadata.topics[topic_name]
-        elif isinstance(topics_metadata, dict):
-            # Direct dict of topic metadata
-            if topic_name in topics_metadata:
-                topic_metadata = topics_metadata[topic_name]
-        else:
-            # Try iterating directly
-            for topic in topics_metadata:
-                if hasattr(topic, 'topic') and topic.topic == topic_name:
-                    topic_metadata = topic
-                    break
-                elif hasattr(topic, 'name') and topic.name == topic_name:
-                    topic_metadata = topic
-                    break
+        logger.info(f"Topic metadata response: {metadata}")
+        if metadata is None or len(metadata) == 0:
+            return json.dumps({
+                "error": f"Topic '{topic_name}' not found",
+                "name": topic_name,
+                "partitions": [],
+                "configs": {}
+            }, indent=2)
         
-        if not topic_metadata:
-            raise Exception(f"Topic '{topic_name}' not found")
+        topic_metadata = metadata[0]
+        partitions_info = []
         
-        # Get partition details
-        partitions = []
+        # Parse partition information
+        partitions_data = topic_metadata.get("partitions", [])
+        if not partitions_data and hasattr(topic_metadata, 'partitions'):
+            partitions_data = topic_metadata.partitions
+            
+        for partition in partitions_data:
+            partition_info = {
+                "partition": partition.get("partition") if isinstance(partition, dict) else getattr(partition, 'partition', 0),
+                "leader": partition.get("leader") if isinstance(partition, dict) else getattr(partition, 'leader', -1),
+                "replicas": partition.get("replicas", []) if isinstance(partition, dict) else list(getattr(partition, 'replicas', [])),
+                "isr": partition.get("isr", []) if isinstance(partition, dict) else list(getattr(partition, 'isr', []))
+            }
+            partitions_info.append(partition_info)
         
-        # Parse partition metadata (format varies by kafka-python version)
-        partitions_dict = None
-        if hasattr(topic_metadata, 'partitions'):
-            partitions_dict = topic_metadata.partitions
-            logger.info(f"Found partitions via .partitions: {type(partitions_dict)}, length: {len(partitions_dict) if partitions_dict else 0}")
-        elif isinstance(topic_metadata, dict) and 'partitions' in topic_metadata:
-            partitions_dict = topic_metadata['partitions']
-            logger.info(f"Found partitions via ['partitions']: {type(partitions_dict)}, length: {len(partitions_dict) if partitions_dict else 0}")
-        
-        if partitions_dict:
-            # Handle both dict and list formats
-            if isinstance(partitions_dict, dict):
-                for partition_id, partition_meta in partitions_dict.items():
-                    partition_info = {
-                        "partition": partition_id,
-                        "leader": getattr(partition_meta, 'leader', -1) if hasattr(partition_meta, 'leader') else partition_meta.get('leader', -1) if isinstance(partition_meta, dict) else -1,
-                        "replicas": list(getattr(partition_meta, 'replicas', []) if hasattr(partition_meta, 'replicas') else partition_meta.get('replicas', []) if isinstance(partition_meta, dict) else []),
-                        "isr": list(getattr(partition_meta, 'isr', []) if hasattr(partition_meta, 'isr') else partition_meta.get('isr', []) if isinstance(partition_meta, dict) else [])
-                    }
-                    partitions.append(partition_info)
-            elif isinstance(partitions_dict, (list, tuple)):
-                for i, partition_meta in enumerate(partitions_dict):
-                    partition_info = {
-                        "partition": i,
-                        "leader": getattr(partition_meta, 'leader', -1) if hasattr(partition_meta, 'leader') else partition_meta.get('leader', -1) if isinstance(partition_meta, dict) else -1,
-                        "replicas": list(getattr(partition_meta, 'replicas', []) if hasattr(partition_meta, 'replicas') else partition_meta.get('replicas', []) if isinstance(partition_meta, dict) else []),
-                        "isr": list(getattr(partition_meta, 'isr', []) if hasattr(partition_meta, 'isr') else partition_meta.get('isr', []) if isinstance(partition_meta, dict) else [])
-                    }
-                    partitions.append(partition_info)
-        else:
-            logger.warning(f"No partition information found for topic {topic_name}")
-            # Create a default partition structure if we can't find partition details
-            # This ensures the test doesn't fail completely
-            partitions = [{"partition": 0, "leader": -1, "replicas": [], "isr": []}]
-        
-        # Get topic configurations
+        # Get topic configurations (optional)
         topic_configs = {}
         try:
+            from kafka.admin import ConfigResource, ConfigResourceType
             config_resource = ConfigResource(ConfigResourceType.TOPIC, topic_name)
             configs_result = admin.describe_configs([config_resource])
             
-            # configs_result is a dict {ConfigResource: Dict[str, ConfigEntry]}
-            if isinstance(configs_result, dict) and config_resource in configs_result:
+            if config_resource in configs_result:
                 for config_name, config_entry in configs_result[config_resource].items():
                     topic_configs[config_name] = config_entry.value
-            elif isinstance(configs_result, list) and len(configs_result) > 0:
-                # Attempt to parse if it's a list, looking for a matching resource
-                for resource_entry in configs_result:
-                    if (getattr(resource_entry, 'resource_name', None) == topic_name and 
-                        getattr(resource_entry, 'resource_type', None) == ConfigResourceType.TOPIC):
-                        for config_entry in getattr(resource_entry, 'configs', []):
-                            topic_configs[getattr(config_entry, 'name')] = getattr(config_entry, 'value')
-                        break
         except Exception as config_error:
-            logger.warning(f"Failed to get configs for topic {topic_name}: {config_error}")
+            logger.warning(f"Could not get topic configs for {topic_name}: {config_error}")
             topic_configs = {}
         
-        # Create the response as a dictionary and return JSON
-        topic_details = {
+        # Create the result in the same format as before
+        result = {
             "name": topic_name,
-            "partitions": sorted(partitions, key=lambda x: x["partition"]),
+            "partitions": partitions_info,
             "configs": topic_configs
         }
         
-        return json.dumps(topic_details, indent=2)
+        return json.dumps(result, indent=2)
         
     except Exception as e:
         logger.error(f"Failed to describe topic '{topic_name}': {str(e)}")
-        error_response = {
+        return json.dumps({
             "error": f"Failed to describe topic '{topic_name}': {str(e)}",
             "name": topic_name,
             "partitions": [],
             "configs": {}
-        }
-        return json.dumps(error_response, indent=2)
+        }, indent=2)
 
 @mcp.tool()
 async def create_topic(
@@ -692,7 +648,7 @@ async def consume_messages(
     ctx: Context,
     topic: str,
     max_messages: int = 10,
-    timeout_ms: int = 5000,
+    timeout_ms: int = 10000,
     from_beginning: bool = False,
     partition: Optional[int] = None
 ) -> str:
@@ -703,14 +659,20 @@ async def consume_messages(
 
     try:
         consumer_config = KAFKA_CONFIG.copy()
+        # Ensure proper timeout configuration
+        # session_timeout_ms must be less than request_timeout_ms
+        # and consumer_timeout_ms should not conflict
         consumer_config.update({
             'group_id': group_id,
             'auto_offset_reset': 'earliest' if from_beginning else 'latest',
             'enable_auto_commit': False,
             'value_deserializer': lambda m: m.decode('utf-8') if m else None,
             'key_deserializer': lambda m: m.decode('utf-8') if m else None,
-            'request_timeout_ms': timeout_ms + 1000,
-            'consumer_timeout_ms': timeout_ms,  # Add consumer timeout
+            'session_timeout_ms': 10000,  # Default session timeout
+            'request_timeout_ms': 30000,  # Must be larger than session timeout
+            'heartbeat_interval_ms': 3000,  # Should be 1/3 of session timeout
+            'max_poll_interval_ms': 300000,  # 5 minutes max poll interval
+            # Remove consumer_timeout_ms as it conflicts with our manual timeout handling
         })
         
         consumer = KafkaConsumer(**consumer_config)
@@ -884,20 +846,41 @@ async def list_consumer_groups(ctx: Context) -> str:
         groups = admin.list_consumer_groups()
         
         result = []
-        # groups is a list of ConsumerGroupListing objects
+        # Handle different return types from list_consumer_groups()
         for group in groups:
             coordinator_info = None
-            if hasattr(group, 'coordinator') and group.coordinator:
-                coordinator_info = f"{group.coordinator.host}:{group.coordinator.port}"
-            elif isinstance(group, dict) and 'coordinator' in group and group['coordinator']:
-                 coordinator_info = f"{group['coordinator'].get('host')}:{group['coordinator'].get('port')}"
-
-            result.append({
-                "group_id": group.group_id,
-                "state": getattr(group, 'state', 'UNKNOWN'), # state might be missing in some old versions
-                "members": 0,  # Will be filled by describe operation if needed
-                "coordinator": coordinator_info
-            })
+            group_id = None
+            state = 'UNKNOWN'
+            
+            # Handle different group object types
+            if hasattr(group, 'group_id'):
+                # ConsumerGroupListing object
+                group_id = group.group_id
+                state = getattr(group, 'state', 'UNKNOWN')
+                if hasattr(group, 'coordinator') and group.coordinator:
+                    coordinator_info = f"{group.coordinator.host}:{group.coordinator.port}"
+            elif isinstance(group, dict):
+                # Dictionary format
+                group_id = group.get('group_id')
+                state = group.get('state', 'UNKNOWN')
+                if 'coordinator' in group and group['coordinator']:
+                    coordinator_info = f"{group['coordinator'].get('host')}:{group['coordinator'].get('port')}"
+            elif isinstance(group, (tuple, list)) and len(group) >= 1:
+                # Tuple/list format (group_id, ...)
+                group_id = str(group[0])
+                state = str(group[1]) if len(group) > 1 else 'UNKNOWN'
+            else:
+                # Fallback - try to convert to string
+                group_id = str(group)
+                state = 'UNKNOWN'
+            
+            if group_id:
+                result.append({
+                    "group_id": group_id,
+                    "state": state,
+                    "members": 0,  # Will be filled by describe operation if needed
+                    "coordinator": coordinator_info
+                })
         
         sorted_result = sorted(result, key=lambda x: x["group_id"])
         return json.dumps(sorted_result, indent=2)
