@@ -4,7 +4,7 @@
       "command": "python",
       "args": ["/home/oem/Documents/kafka-mcp-server/kafka_mcp_server.py"],
       "env": {
-        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
+        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092,localhost:9093,localhost:9094",
         "KAFKA_SECURITY_PROTOCOL": "PLAINTEXT"
       }
     }

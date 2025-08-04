@@ -3,13 +3,3 @@ mcp>=1.0.0
 kafka-python>=2.0.2
 pydantic>=2.0.0
 
-# Optional: For enhanced features
-# confluent-kafka[avro,json,protobuf]>=2.3.0
-# requests>=2.31.0
-# python-dotenv>=1.0.0
-
-# Development dependencies (optional)
-# pytest>=7.4.0
-# pytest-asyncio>=0.21.0
-# black>=23.0.0
-# flake8>=6.0.0

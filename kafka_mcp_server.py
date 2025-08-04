@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
 KAFKA_CONFIG = {
-    'bootstrap_servers': os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(','),
+    'bootstrap_servers': os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092,localhost:9093,localhost:9094').split(','),
     'security_protocol': os.getenv('KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT'),
     'sasl_mechanism': os.getenv('KAFKA_SASL_MECHANISM'),
     'sasl_username': os.getenv('KAFKA_SASL_USERNAME'),
@@ -654,28 +654,47 @@ async def consume_messages(
 ) -> str:
     """Consume messages from a Kafka topic."""
     
-    # Use timestamp-based group ID to avoid consumer conflicts
     group_id = f'mcp-consumer-{int(time.time() * 1000)}'
 
     try:
         consumer_config = KAFKA_CONFIG.copy()
-        # Ensure proper timeout configuration
-        # session_timeout_ms must be less than request_timeout_ms
-        # and consumer_timeout_ms should not conflict
         consumer_config.update({
             'group_id': group_id,
             'auto_offset_reset': 'earliest' if from_beginning else 'latest',
             'enable_auto_commit': False,
             'value_deserializer': lambda m: m.decode('utf-8') if m else None,
             'key_deserializer': lambda m: m.decode('utf-8') if m else None,
-            'session_timeout_ms': 10000,  # Default session timeout
-            'request_timeout_ms': 30000,  # Must be larger than session timeout
-            'heartbeat_interval_ms': 3000,  # Should be 1/3 of session timeout
-            'max_poll_interval_ms': 300000,  # 5 minutes max poll interval
-            # Remove consumer_timeout_ms as it conflicts with our manual timeout handling
+            'session_timeout_ms': 30000,
+            'request_timeout_ms': 60000,
+            'heartbeat_interval_ms': 10000,
+            'max_poll_interval_ms': 300000,
+            'connections_max_idle_ms': 540000,
+            'retry_backoff_ms': 1000,
+            'reconnect_backoff_ms': 1000,
+            'reconnect_backoff_max_ms': 10000,
+            'metadata_max_age_ms': 300000,
         })
         
-        consumer = KafkaConsumer(**consumer_config)
+        # Retry consumer creation with exponential backoff
+        max_retries = 3
+        retry_delay = 1
+        
+        consumer = None
+        for attempt in range(max_retries):
+            try:
+                consumer = KafkaConsumer(**consumer_config)
+                logger.info(f"Consumer created successfully on attempt {attempt + 1}")
+                break
+            except Exception as e:
+                logger.warning(f"Consumer creation attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise Exception(f"Failed to create consumer after {max_retries} attempts: {e}")
+        
+        if not consumer:
+            raise Exception("Failed to create consumer")
         
         try:
             # Subscribe to topic or assign specific partition
@@ -693,8 +712,9 @@ async def consume_messages(
             
             messages = []
             
-            # Allow some time for consumer to join group and get assignments
-            await asyncio.sleep(1) 
+            # Allow more time for consumer to join group and get assignments
+            logger.info(f"Waiting for consumer group coordination for topic {topic}")
+            await asyncio.sleep(3)  # Increased wait time for coordinator
             
             start_time = time.time() * 1000
             
@@ -705,51 +725,61 @@ async def consume_messages(
                     logger.info(f"Consume timeout reached for topic {topic}. Returning {len(messages)} messages.")
                     break
                 
-                # poll returns {TopicPartition: [ConsumerRecord, ...]}
-                msg_pack = consumer.poll(timeout_ms=1000, max_records=max_messages - len(messages)) 
-                
-                if not msg_pack:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                for tp, msgs in msg_pack.items():
-                    for msg in msgs:
-                        headers = {}
-                        if msg.headers:
-                            try:
-                                headers = {k: v.decode('utf-8') for k, v in msg.headers}
-                            except Exception as header_decode_e:
-                                logger.warning(f"Failed to decode header: {header_decode_e}")
-                                headers = {k: str(v) for k, v in msg.headers}
-                        
-                        try:
-                            message_info = {
-                                "topic": str(msg.topic),
-                                "partition": int(msg.partition),
-                                "offset": int(msg.offset),
-                                "key": str(msg.key) if msg.key is not None else None,
-                                "value": str(msg.value) if msg.value is not None else "",
-                                "timestamp": int(msg.timestamp) if msg.timestamp is not None else 0,
-                                "headers": headers
-                            }
-                            messages.append(message_info)
-                        except (ValueError, TypeError) as conversion_error:
-                            logger.warning(f"Failed to convert message data: {conversion_error}")
-                            messages.append({
-                                "topic": str(getattr(msg, 'topic', 'unknown')),
-                                "partition": int(getattr(msg, 'partition', 0)),
-                                "offset": int(getattr(msg, 'offset', 0)),
-                                "key": str(getattr(msg, 'key', None)) if getattr(msg, 'key', None) is not None else None,
-                                "value": str(getattr(msg, 'value', '')),
-                                "timestamp": int(getattr(msg, 'timestamp', 0)),
-                                "headers": headers
-                            })
-                        
-                        if len(messages) >= max_messages:
-                            break
+                try:
+                    # poll returns {TopicPartition: [ConsumerRecord, ...]}
+                    msg_pack = consumer.poll(timeout_ms=2000, max_records=max_messages - len(messages))
                     
-                    if len(messages) >= max_messages:
-                        break
+                    if not msg_pack:
+                        await asyncio.sleep(0.5)
+                        continue
+                    
+                    for tp, msgs in msg_pack.items():
+                        for msg in msgs:
+                            headers = {}
+                            if msg.headers:
+                                try:
+                                    headers = {k: v.decode('utf-8') for k, v in msg.headers}
+                                except Exception as header_decode_e:
+                                    logger.warning(f"Failed to decode header: {header_decode_e}")
+                                    headers = {k: str(v) for k, v in msg.headers}
+                            
+                            try:
+                                message_info = {
+                                    "topic": str(msg.topic),
+                                    "partition": int(msg.partition),
+                                    "offset": int(msg.offset),
+                                    "key": str(msg.key) if msg.key is not None else None,
+                                    "value": str(msg.value) if msg.value is not None else "",
+                                    "timestamp": int(msg.timestamp) if msg.timestamp is not None else 0,
+                                    "headers": headers
+                                }
+                                messages.append(message_info)
+                            except (ValueError, TypeError) as conversion_error:
+                                logger.warning(f"Failed to convert message data: {conversion_error}")
+                                messages.append({
+                                    "topic": str(getattr(msg, 'topic', 'unknown')),
+                                    "partition": int(getattr(msg, 'partition', 0)),
+                                    "offset": int(getattr(msg, 'offset', 0)),
+                                    "key": str(getattr(msg, 'key', None)) if getattr(msg, 'key', None) is not None else None,
+                                    "value": str(getattr(msg, 'value', '')),
+                                    "timestamp": int(getattr(msg, 'timestamp', 0)),
+                                    "headers": headers
+                                })
+                                
+                except Exception as poll_error:
+                    logger.warning(f"Poll error for topic {topic}: {poll_error}")
+                    await asyncio.sleep(1)
+                    continue
+            
+            if not messages:
+                return json.dumps({
+                    "message": f"No messages are currently available to consume from the \"{topic}\" topic. This may be because all messages have already been consumed by the current consumer group, or there are no new messages since the last fetch.",
+                    "topic": topic,
+                    "consumer_group": group_id,
+                    "from_beginning": from_beginning,
+                    "timeout_ms": timeout_ms,
+                    "messages": []
+                }, indent=2)
             
             return json.dumps(messages, indent=2)
             
@@ -763,14 +793,13 @@ async def consume_messages(
 @mcp.tool()
 async def get_topic_offsets(ctx: Context, topic: str) -> str:
     """Get earliest and latest offsets for all partitions of a topic."""
-    # Note: KafkaConsumer creates its own connections.
     
     try:
         consumer_config = KAFKA_CONFIG.copy()
         consumer_config.update({
             'group_id': f'mcp-offset-checker-{int(time.time() * 1000)}',
             'enable_auto_commit': False,
-            'consumer_timeout_ms': 1000 # Short timeout for offset operations
+            'consumer_timeout_ms': 1000
         })
         
         consumer = KafkaConsumer(**consumer_config)
@@ -925,9 +954,9 @@ async def describe_consumer_group(ctx: Context, group_id: str) -> str:
         coordinator_info = None
         if hasattr(group_desc, 'coordinator') and group_desc.coordinator:
             coordinator_info = {
-                'id': getattr(group_desc.coordinator, 'nodeId', 'N/A'),
-                'host': getattr(group_desc.coordinator, 'host', 'N/A'),
-                'port': getattr(group_desc.coordinator, 'port', 'N/A')
+                "id": getattr(group_desc.coordinator, 'nodeId', None) or group_desc.coordinator.get('id', 'N/A'),
+                "host": getattr(group_desc.coordinator, 'host', None) or group_desc.coordinator.get('host', 'N/A'),
+                "port": getattr(group_desc.coordinator, 'port', None) or group_desc.coordinator.get('port', 'N/A')
             }
 
         result = {
@@ -1024,10 +1053,9 @@ async def health_check(ctx: Context) -> str:
         }
         return json.dumps(result, indent=2)
 
-# RESOURCES - NO 'ctx' PARAMETER IN SIGNATURE (as URI has no parameters)
 
 @mcp.resource("kafka://cluster/info")
-async def cluster_info_resource() -> str: # Removed ctx: Context
+async def cluster_info_resource() -> str:
     """Get cluster information as a resource."""
     global _kafka_context
     if _kafka_context is None or _kafka_context.admin_client is None:
